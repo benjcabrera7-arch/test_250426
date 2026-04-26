@@ -3,8 +3,8 @@ name: Japan Flight Monitor
 on:
   workflow_dispatch:
   schedule:
-    # GitHub Actions cron is best-effort and 5 minutes is the fastest supported cadence.
-    - cron: '*/5 * * * *'
+    # 30-minute cadence keeps alerts useful without unnecessary drift, spam, or quota pressure.
+    - cron: '*/30 * * * *'
 
 permissions:
   contents: read
@@ -20,8 +20,8 @@ jobs:
     env:
       PYTHONIOENCODING: utf-8
       GITHUB_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-      GMAIL_SMTP_USERNAME: benjcabrera7@gmail.com
-      NOTIFY_EMAIL_TO: benjcabrera7@gmail.com
+      GMAIL_SMTP_USERNAME: ${{ secrets.GMAIL_SMTP_USERNAME }}
+      NOTIFY_EMAIL_TO: ${{ secrets.NOTIFY_EMAIL_TO }}
       GMAIL_SMTP_APP_PASSWORD: ${{ secrets.GMAIL_SMTP_APP_PASSWORD }}
       TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
       TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}

@@ -3,3 +3,6 @@ __pycache__/
 build/
 dist/
 *.pyc
+flight-monitor-output.txt
+flight-monitor-report.json
+.monitor-state/
