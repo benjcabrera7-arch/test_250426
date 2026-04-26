@@ -146,7 +146,7 @@ def send_telegram(text: str) -> None:
 
 def send_email(subject: str, body: str) -> None:
     smtp_username = require_env("GMAIL_SMTP_USERNAME")
-    smtp_password = require_env("GMAIL_SMTP_APP_PASSWORD")
+    smtp_password = require_env("GMAIL_SMTP_APP_PASSWORD").replace(" ", "")
     recipient = require_env("NOTIFY_EMAIL_TO")
     smtp_host = os.environ.get("GMAIL_SMTP_HOST", DEFAULT_SMTP_HOST)
     smtp_port = int(os.environ.get("GMAIL_SMTP_PORT", str(DEFAULT_SMTP_PORT)))
