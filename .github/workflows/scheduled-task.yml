@@ -1,4 +1,4 @@
-name: Japan Flight Monitor
+name: Scheduled Task
 
 on:
   workflow_dispatch:
@@ -10,7 +10,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: japan-flight-monitor
+  group: scheduled-task
   cancel-in-progress: true
 
 jobs:
@@ -20,31 +20,48 @@ jobs:
     env:
       PYTHONIOENCODING: utf-8
       GITHUB_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-      GMAIL_SMTP_USERNAME: ${{ secrets.GMAIL_SMTP_USERNAME }}
-      NOTIFY_EMAIL_TO: ${{ secrets.NOTIFY_EMAIL_TO }}
-      GMAIL_SMTP_APP_PASSWORD: ${{ secrets.GMAIL_SMTP_APP_PASSWORD }}
-      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-      TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+      QUERY_INPUTS_A: ${{ secrets.QUERY_INPUTS_A }}
+      QUERY_INPUTS_B: ${{ secrets.QUERY_INPUTS_B }}
+      FILTER_TOKENS: ${{ secrets.FILTER_TOKENS }}
+      MIN_THRESHOLD: ${{ secrets.MIN_THRESHOLD }}
+      MAX_THRESHOLD: ${{ secrets.MAX_THRESHOLD }}
+      LANGUAGE_CODE: ${{ secrets.LANGUAGE_CODE }}
+      MARKET_CODE: ${{ secrets.MARKET_CODE }}
+      LOCALE_CODE: ${{ secrets.LOCALE_CODE }}
+      TIMEZONE_NAME: ${{ secrets.TIMEZONE_NAME }}
+      VALUE_LABEL: ${{ secrets.VALUE_LABEL }}
+      INPUT_VALUE_TOKEN: ${{ secrets.INPUT_VALUE_TOKEN }}
+      SOURCE_BASE_URL: ${{ secrets.SOURCE_BASE_URL }}
+      SOURCE_PATH_TEMPLATE: ${{ secrets.SOURCE_PATH_TEMPLATE }}
+      SUMMARY_SECTION_HEADER: ${{ secrets.SUMMARY_SECTION_HEADER }}
+      PRIMARY_MATCH_LABEL: ${{ secrets.PRIMARY_MATCH_LABEL }}
+      SUMMARY_LABELS: ${{ secrets.SUMMARY_LABELS }}
+      SECTION_BREAK_PREFIXES: ${{ secrets.SECTION_BREAK_PREFIXES }}
+      SMTP_USERNAME: ${{ secrets.SMTP_USERNAME }}
+      SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
+      NOTIFY_TO: ${{ secrets.NOTIFY_TO }}
+      MESSAGE_TOKEN: ${{ secrets.MESSAGE_TOKEN }}
+      MESSAGE_TARGET: ${{ secrets.MESSAGE_TARGET }}
 
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
 
-      - name: Restore notification state
+      - name: Restore state
         id: restore-alert-state
         uses: actions/cache/restore@v4
         with:
-          path: .monitor-state
-          key: ${{ runner.os }}-japan-flight-monitor-state-${{ github.ref_name }}-${{ github.run_id }}
+          path: .task-state
+          key: ${{ runner.os }}-scheduled-task-state-${{ github.ref_name }}-${{ github.run_id }}
           restore-keys: |
-            ${{ runner.os }}-japan-flight-monitor-state-${{ github.ref_name }}-
+            ${{ runner.os }}-scheduled-task-state-${{ github.ref_name }}-
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
 
-      - name: Cache Playwright browsers
+      - name: Cache runtime browser
         uses: actions/cache@v4
         with:
           path: ~/.cache/ms-playwright
@@ -53,29 +70,29 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install playwright requests PyNaCl
+          pip install -r requirements.txt
 
-      - name: Install Chromium
+      - name: Install browser runtime
         run: python -m playwright install chromium
 
-      - name: Run flight monitor
+      - name: Run monitor
         run: |
-          python japan_flight_monitor.py --top 20 --json-output flight-monitor-report.json | tee flight-monitor-output.txt
+          python monitor.py --top 20 --json-output task-report.json | tee task-output.txt
 
       - name: Send notifications for new matches
         run: |
-          python send_flight_notifications.py \
-            --report flight-monitor-report.json \
-            --state-file .monitor-state/last_notification_hash.txt
+          python notifier.py \
+            --report task-report.json \
+            --state-file .task-state/last_notification_hash.txt
 
       - name: Publish workflow summary
         shell: bash
         run: |
           {
-            echo "## Japan flight monitor"
+            echo "## Scheduled task"
             echo
             echo '```text'
-            cat flight-monitor-output.txt
+            cat task-output.txt
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
@@ -83,14 +100,14 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: japan-flight-monitor-${{ github.run_number }}
+          name: scheduled-task-${{ github.run_number }}
           path: |
-            flight-monitor-output.txt
-            flight-monitor-report.json
+            task-output.txt
+            task-report.json
 
-      - name: Save notification state
-        if: always() && hashFiles('.monitor-state/last_notification_hash.txt') != ''
+      - name: Save state
+        if: always() && hashFiles('.task-state/last_notification_hash.txt') != ''
         uses: actions/cache/save@v4
         with:
-          path: .monitor-state
-          key: ${{ runner.os }}-japan-flight-monitor-state-${{ github.ref_name }}-${{ github.run_id }}
+          path: .task-state
+          key: ${{ runner.os }}-scheduled-task-state-${{ github.ref_name }}-${{ github.run_id }}

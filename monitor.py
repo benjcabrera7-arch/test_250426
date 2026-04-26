@@ -4,132 +4,121 @@ from dataclasses import asdict, dataclass
 from datetime import datetime
 import argparse
 import json
+import os
 import re
 import sys
 import time
+from urllib.parse import urlencode
 
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 from playwright.sync_api import sync_playwright
 
 
-DEFAULT_ORIGINS = {
-    "manila": "Manila",
-    "cebu-city": "Cebu City",
-    "clark-angeles-city": "Clark (Angeles City)",
-    "davao-city": "Davao City",
+LANGUAGE_CODE_DEFAULT = os.getenv("LANGUAGE_CODE", "en")
+MARKET_CODE_DEFAULT = os.getenv("MARKET_CODE", "")
+LOCALE_CODE_DEFAULT = os.getenv("LOCALE_CODE", "en-US")
+TIMEZONE_NAME_DEFAULT = os.getenv("TIMEZONE_NAME", "UTC")
+VALUE_LABEL_DEFAULT = os.getenv("VALUE_LABEL", "VALUE")
+INPUT_VALUE_TOKEN_DEFAULT = os.getenv("INPUT_VALUE_TOKEN", "VAL")
+SOURCE_BASE_URL = os.getenv("SOURCE_BASE_URL", "")
+SOURCE_PATH_TEMPLATE = os.getenv("SOURCE_PATH_TEMPLATE", "")
+SUMMARY_SECTION_HEADER = os.getenv("SUMMARY_SECTION_HEADER", "")
+PRIMARY_MATCH_LABEL = os.getenv("PRIMARY_MATCH_LABEL", "")
+SUMMARY_LABELS = {
+    item.strip()
+    for item in os.getenv("SUMMARY_LABELS", "").split("||")
+    if item.strip()
 }
-
-DEFAULT_DESTINATIONS = {
-    "tokyo": "Tokyo",
-    "osaka": "Osaka",
-    "nagoya": "Nagoya",
-    "fukuoka": "Fukuoka",
-    "sapporo": "Sapporo",
-}
-
-SECTION_BREAK_PREFIXES = (
-    "When is the cheapest time to fly?",
-    "Popular airlines from",
-    "Popular airports near",
-    "Frequently asked questions",
-    "Search more flights",
-    "Additional Links",
+SECTION_BREAK_PREFIXES = tuple(
+    item.strip()
+    for item in os.getenv("SECTION_BREAK_PREFIXES", "").split("||")
+    if item.strip()
+)
+PRICE_RE = re.compile(
+    rf"(?:from\s+)?(?:{re.escape(INPUT_VALUE_TOKEN_DEFAULT)}|[A-Z]{{3}})\s*([0-9,]+)"
 )
 
-PRICE_RE = re.compile(r"(?:from\s+)?PHP\s*([0-9,]+)")
-
 
 @dataclass(frozen=True)
-class OverviewOffer:
+class SummaryEntry:
     label: str
-    price_php: int
-    airline: str
+    value: int
+    source: str
     details: str
 
 
 @dataclass(frozen=True)
-class AirlineFare:
-    origin: str
-    destination: str
-    airline: str
-    service: str
-    price_php: int
-    source_url: str
-
-
-@dataclass(frozen=True)
-class RouteSnapshot:
-    origin: str
-    destination: str
+class QuerySnapshot:
+    input_a: str
+    input_b: str
     url: str
-    offers: list[OverviewOffer]
-    airline_fares: list[AirlineFare]
+    entries: list[SummaryEntry]
 
 
 @dataclass(frozen=True)
-class MatchingFare:
-    origin: str
-    destination: str
-    airline: str
-    price_php: int
+class MatchRecord:
+    input_a: str
+    input_b: str
+    source: str
+    value: int
     details: str
-    source_url: str
+    reference_url: str
+
+
+def parse_list_env(name: str) -> list[str]:
+    raw_value = os.getenv(name, "")
+    return [item.strip() for item in raw_value.split(",") if item.strip()]
+
+
+def parse_int_env(name: str, fallback: int) -> int:
+    raw_value = os.getenv(name, "").strip()
+    if not raw_value:
+        return fallback
+    return int(raw_value)
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description=(
-            "Check current Google Travel route-page fares from the Philippines to Japan "
-            "and print the cheapest results in the terminal."
-        )
+        description="Run a scheduled page check and print matches that meet configured thresholds."
     )
     parser.add_argument(
-        "--origins",
+        "--inputs-a",
         nargs="+",
-        default=list(DEFAULT_ORIGINS),
-        metavar="SLUG",
-        help=(
-            "Origin city slugs to scan. "
-            f"Defaults: {', '.join(DEFAULT_ORIGINS)}"
-        ),
+        default=parse_list_env("QUERY_INPUTS_A"),
+        metavar="KEY",
+        help="First query input set. Falls back to QUERY_INPUTS_A when set.",
     )
     parser.add_argument(
-        "--destinations",
+        "--inputs-b",
         nargs="+",
-        default=list(DEFAULT_DESTINATIONS),
-        metavar="SLUG",
-        help=(
-            "Japan destination city slugs to scan. "
-            f"Defaults: {', '.join(DEFAULT_DESTINATIONS)}"
-        ),
+        default=parse_list_env("QUERY_INPUTS_B"),
+        metavar="KEY",
+        help="Second query input set. Falls back to QUERY_INPUTS_B when set.",
     )
     parser.add_argument(
-        "--airlines",
+        "--filters",
         nargs="+",
-        default=[],
-        metavar="NAME",
-        help=(
-            "Only show airline fares whose names contain one of these tokens. "
-            "If omitted, the script prints all airlines it finds."
-        ),
+        default=parse_list_env("FILTER_TOKENS"),
+        metavar="TOKEN",
+        help="Optional source-name filters. Falls back to FILTER_TOKENS when set.",
     )
     parser.add_argument(
-        "--min-price",
+        "--min-threshold",
         type=int,
-        default=11000,
-        help="Minimum round-trip price to show. Default: 11000",
+        default=parse_int_env("MIN_THRESHOLD", 0),
+        help="Minimum value to show. Falls back to MIN_THRESHOLD when set.",
     )
     parser.add_argument(
-        "--max-price",
+        "--max-threshold",
         type=int,
-        default=13000,
-        help="Maximum round-trip price to show. Default: 13000",
+        default=parse_int_env("MAX_THRESHOLD", 999999),
+        help="Maximum value to show. Falls back to MAX_THRESHOLD when set.",
     )
     parser.add_argument(
         "--top",
         type=int,
         default=12,
-        help="How many matching round-trip fares to print. Default: 12",
+        help="How many matching records to print. Default: 12",
     )
     parser.add_argument(
         "--watch-minutes",
@@ -138,9 +127,9 @@ def parse_args() -> argparse.Namespace:
         help="Refresh every N minutes until interrupted. Default: 0 (run once)",
     )
     parser.add_argument(
-        "--show-route-overview",
+        "--show-summary",
         action="store_true",
-        help="Also print the cheapest one-way and round-trip overview per route.",
+        help="Also print the parsed summary entries for each query combination.",
     )
     parser.add_argument(
         "--headful",
@@ -154,22 +143,20 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def title_for_slug(slug: str, mapping: dict[str, str]) -> str:
-    if slug in mapping:
-        return mapping[slug]
-    return slug.replace("-", " ").title()
+def format_key(key: str) -> str:
+    return key.replace("-", " ").title()
 
 
 def normalize_line(raw_line: str) -> str:
     line = raw_line.replace("\xa0", " ").strip()
-    line = line.replace("\u20b1", "PHP ")
+    line = line.replace("\u20b1", f"{INPUT_VALUE_TOKEN_DEFAULT} ")
     line = line.replace("\u2014", " - ")
     line = line.replace("\u2013", " - ")
     line = re.sub(r"\s+", " ", line)
     return line.strip()
 
 
-def parse_price(line: str) -> int | None:
+def parse_value(line: str) -> int | None:
     match = PRICE_RE.search(line)
     if not match:
         return None
@@ -193,152 +180,111 @@ def find_section(lines: list[str], prefix: str) -> int | None:
     return None
 
 
-def parse_overview_offers(lines: list[str]) -> list[OverviewOffer]:
-    section_index = find_section(lines, "Flights overview")
+def parse_summary_entries(lines: list[str]) -> list[SummaryEntry]:
+    section_index = find_section(lines, SUMMARY_SECTION_HEADER)
     if section_index is None:
         return []
 
-    labels = {
-        "Cheapest round-trip flights",
-        "Cheapest one-way flight",
-        "Last-minute weekend getaway",
-        "Cheapest business class flights",
-    }
-
-    offers: list[OverviewOffer] = []
+    entries: list[SummaryEntry] = []
     index = section_index + 1
     while index < len(lines):
         line = lines[index]
         if any(line.startswith(prefix) for prefix in SECTION_BREAK_PREFIXES if prefix != "Popular airlines from"):
             break
-        if line not in labels:
+        if line not in SUMMARY_LABELS:
             index += 1
             continue
 
-        price_php = parse_price(lines[index + 1]) if index + 1 < len(lines) else None
-        airline = lines[index + 2] if index + 2 < len(lines) else "Unknown"
+        value = parse_value(lines[index + 1]) if index + 1 < len(lines) else None
+        source = lines[index + 2] if index + 2 < len(lines) else "Unknown"
         detail_parts: list[str] = []
         cursor = index + 3
         while cursor < len(lines):
             next_line = lines[cursor]
-            if next_line in labels or any(next_line.startswith(prefix) for prefix in SECTION_BREAK_PREFIXES):
+            if next_line in SUMMARY_LABELS or any(next_line.startswith(prefix) for prefix in SECTION_BREAK_PREFIXES):
                 break
             if next_line.startswith("The ") or next_line.startswith("View "):
                 break
             detail_parts.append(next_line)
             cursor += 1
 
-        if price_php is not None:
-            offers.append(
-                OverviewOffer(
+        if value is not None:
+            entries.append(
+                SummaryEntry(
                     label=line,
-                    price_php=price_php,
-                    airline=airline,
+                    value=value,
+                    source=source,
                     details=" | ".join(detail_parts),
                 )
             )
         index = cursor
 
-    return offers
+    return entries
 
 
-def parse_popular_airlines(
-    lines: list[str],
-    origin: str,
-    destination: str,
-    source_url: str,
-) -> list[AirlineFare]:
-    section_index = find_section(lines, f"Popular airlines from {origin} to {destination}")
-    if section_index is None:
-        return []
-
-    fares: list[AirlineFare] = []
-    index = section_index + 1
-    while index + 2 < len(lines):
-        airline = lines[index]
-        if any(airline.startswith(prefix) for prefix in SECTION_BREAK_PREFIXES if prefix != "Popular airlines from"):
-            break
-
-        service = lines[index + 1]
-        price_line = lines[index + 2]
-        price_php = parse_price(price_line)
-        if price_php is None:
-            index += 1
-            continue
-
-        fares.append(
-            AirlineFare(
-                origin=origin,
-                destination=destination,
-                airline=airline,
-                service=service,
-                price_php=price_php,
-                source_url=source_url,
-            )
-        )
-        index += 3
-
-    return fares
+def build_query_url(input_a: str, input_b: str) -> str:
+    query_params = {"hl": LANGUAGE_CODE_DEFAULT}
+    if MARKET_CODE_DEFAULT:
+        query_params["gl"] = MARKET_CODE_DEFAULT
+    path = SOURCE_PATH_TEMPLATE.format(input_a=input_a, input_b=input_b)
+    return f"{SOURCE_BASE_URL.rstrip('/')}/{path.lstrip('/')}?{urlencode(query_params)}"
 
 
-def build_route_url(origin_slug: str, destination_slug: str) -> str:
-    return (
-        "https://www.google.com/travel/flights/"
-        f"flights-from-{origin_slug}-to-{destination_slug}.html?hl=en&gl=PH"
-    )
-
-
-def fetch_route_snapshot(page, origin_slug: str, destination_slug: str) -> RouteSnapshot:
-    origin = title_for_slug(origin_slug, DEFAULT_ORIGINS)
-    destination = title_for_slug(destination_slug, DEFAULT_DESTINATIONS)
-    url = build_route_url(origin_slug, destination_slug)
+def fetch_snapshot(page, input_a: str, input_b: str) -> QuerySnapshot:
+    url = build_query_url(input_a, input_b)
 
     page.goto(url, wait_until="domcontentloaded", timeout=45000)
     page.wait_for_timeout(3500)
     body_text = page.locator("body").inner_text(timeout=10000)
     lines = collect_lines(body_text)
 
+    display_a = format_key(input_a)
+    display_b = format_key(input_b)
     if any("Are you a person or a robot?" in line for line in lines):
-        raise RuntimeError(f"Google blocked automated access for {origin} -> {destination}")
+        raise RuntimeError(f"Automated access was blocked for {display_a} -> {display_b}")
 
-    offers = parse_overview_offers(lines)
-    airline_fares = parse_popular_airlines(lines, origin, destination, url)
-    if not offers and not airline_fares:
-        raise RuntimeError(f"No fare blocks found for {origin} -> {destination}")
+    entries = parse_summary_entries(lines)
+    if not entries:
+        raise RuntimeError(f"No summary blocks found for {display_a} -> {display_b}")
 
-    return RouteSnapshot(
-        origin=origin,
-        destination=destination,
+    return QuerySnapshot(
+        input_a=display_a,
+        input_b=display_b,
         url=url,
-        offers=offers,
-        airline_fares=airline_fares,
+        entries=entries,
     )
 
 
-def matches_airline_filter(airline: str, filters: list[str]) -> bool:
+def matches_filter(source: str, filters: list[str]) -> bool:
     if not filters:
         return True
-    airline_lower = airline.lower()
-    return any(filter_token.lower() in airline_lower for filter_token in filters)
+    source_lower = source.lower()
+    return any(filter_token.lower() in source_lower for filter_token in filters)
 
 
 def scan_routes(
-    origins: list[str],
-    destinations: list[str],
+    inputs_a: list[str],
+    inputs_b: list[str],
     headful: bool,
-) -> tuple[list[RouteSnapshot], list[str]]:
-    snapshots: list[RouteSnapshot] = []
+) -> tuple[list[QuerySnapshot], list[str]]:
+    snapshots: list[QuerySnapshot] = []
     failures: list[str] = []
+
+    context_kwargs: dict[str, str] = {}
+    if LOCALE_CODE_DEFAULT:
+        context_kwargs["locale"] = LOCALE_CODE_DEFAULT
+    if TIMEZONE_NAME_DEFAULT:
+        context_kwargs["timezone_id"] = TIMEZONE_NAME_DEFAULT
 
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch(headless=not headful)
-        context = browser.new_context(locale="en-PH", timezone_id="Asia/Manila")
+        context = browser.new_context(**context_kwargs)
         page = context.new_page()
 
-        for origin_slug in origins:
-            for destination_slug in destinations:
+        for input_a in inputs_a:
+            for input_b in inputs_b:
                 try:
-                    snapshot = fetch_route_snapshot(page, origin_slug, destination_slug)
+                    snapshot = fetch_snapshot(page, input_a, input_b)
                     snapshots.append(snapshot)
                 except (PlaywrightTimeoutError, RuntimeError) as exc:
                     failures.append(str(exc))
@@ -349,75 +295,73 @@ def scan_routes(
     return snapshots, failures
 
 
-def format_money(amount: int) -> str:
-    return f"PHP {amount:,}"
+def format_value(amount: int) -> str:
+    if VALUE_LABEL_DEFAULT:
+        return f"{VALUE_LABEL_DEFAULT} {amount:,}"
+    return f"{amount:,}"
 
 
-def is_round_trip_offer(offer: OverviewOffer) -> bool:
-    return offer.label == "Cheapest round-trip flights"
+def is_primary_match(entry: SummaryEntry) -> bool:
+    return entry.label == PRIMARY_MATCH_LABEL
 
 
-def collect_matching_round_trip_fares(
-    snapshots: list[RouteSnapshot],
-    airline_filters: list[str],
-    min_price: int,
-    max_price: int,
-) -> list[MatchingFare]:
+def collect_matches(
+    snapshots: list[QuerySnapshot],
+    filters: list[str],
+    min_threshold: int,
+    max_threshold: int,
+) -> list[MatchRecord]:
     matches = [
-        MatchingFare(
-            origin=snapshot.origin,
-            destination=snapshot.destination,
-            airline=offer.airline,
-            price_php=offer.price_php,
-            details=offer.details,
-            source_url=snapshot.url,
+        MatchRecord(
+            input_a=snapshot.input_a,
+            input_b=snapshot.input_b,
+            source=entry.source,
+            value=entry.value,
+            details=entry.details,
+            reference_url=snapshot.url,
         )
         for snapshot in snapshots
-        for offer in snapshot.offers
-        if is_round_trip_offer(offer)
-        and min_price <= offer.price_php <= max_price
-        and matches_airline_filter(offer.airline, airline_filters)
+        for entry in snapshot.entries
+        if is_primary_match(entry)
+        and min_threshold <= entry.value <= max_threshold
+        and matches_filter(entry.source, filters)
     ]
     matches.sort(
         key=lambda match: (
-            match.price_php,
-            match.airline,
-            match.origin,
-            match.destination,
+            match.value,
+            match.source,
+            match.input_a,
+            match.input_b,
         )
     )
     return matches
 
 
-def print_route_overview(snapshots: list[RouteSnapshot]) -> None:
-    print("\nRoute overview")
+def print_summary(snapshots: list[QuerySnapshot]) -> None:
+    print("\nSummary")
     print("-" * 80)
     for snapshot in snapshots:
-        print(f"{snapshot.origin} -> {snapshot.destination}")
-        if not snapshot.offers:
-            print("  no overview fares found")
+        print(f"{snapshot.input_a} -> {snapshot.input_b}")
+        if not snapshot.entries:
+            print("  no summary entries found")
             continue
-        for offer in snapshot.offers:
-            details = f" | {offer.details}" if offer.details else ""
-            print(
-                f"  {offer.label}: {format_money(offer.price_php)} | {offer.airline}{details}"
-            )
+        for entry in snapshot.entries:
+            details = f" | {entry.details}" if entry.details else ""
+            print(f"  {entry.label}: {format_value(entry.value)} | {entry.source}{details}")
 
 
-def print_matching_round_trip_fares(matches: list[MatchingFare], top: int) -> None:
-    print("\nMatching round-trip fares")
+def print_matches(matches: list[MatchRecord], top: int) -> None:
+    print("\nMatching results")
     print("-" * 80)
     if not matches:
-        print(
-            "No live round-trip fares matched the current airline filter and PHP range."
-        )
+        print("No live results matched the current filters and thresholds.")
         return
 
     for index, match in enumerate(matches[:top], start=1):
         details = f" | {match.details}" if match.details else ""
         print(
-            f"{index:>2}. {format_money(match.price_php):<12} | {match.airline:<20} | "
-            f"{match.origin:<22} -> {match.destination:<10}{details}"
+            f"{index:>2}. {format_value(match.value):<12} | {match.source:<20} | "
+            f"{match.input_a:<22} -> {match.input_b:<10}{details}"
         )
 
 
@@ -425,19 +369,20 @@ def write_json_report(
     report_path: str,
     scan_time: str,
     args: argparse.Namespace,
-    snapshots: list[RouteSnapshot],
-    matches: list[MatchingFare],
+    snapshots: list[QuerySnapshot],
+    matches: list[MatchRecord],
     failures: list[str],
 ) -> None:
     report = {
         "scan_time": scan_time,
-        "min_price": args.min_price,
-        "max_price": args.max_price,
-        "origins": args.origins,
-        "destinations": args.destinations,
-        "airlines": args.airlines,
+        "value_label": VALUE_LABEL_DEFAULT,
+        "min_threshold": args.min_threshold,
+        "max_threshold": args.max_threshold,
+        "inputs_a": args.inputs_a,
+        "inputs_b": args.inputs_b,
+        "filters": args.filters,
         "matched_count": len(matches),
-        "routes_scanned": len(snapshots),
+        "queries_scanned": len(snapshots),
         "has_matches": bool(matches),
         "matches": [asdict(match) for match in matches],
         "failures": failures,
@@ -455,23 +400,37 @@ def print_failures(failures: list[str]) -> None:
         print(f"- {failure}")
 
 
+def validate_args(args: argparse.Namespace) -> None:
+    if not args.inputs_a:
+        raise RuntimeError("No inputs configured for the first query set.")
+    if not args.inputs_b:
+        raise RuntimeError("No inputs configured for the second query set.")
+    if args.min_threshold > args.max_threshold:
+        raise RuntimeError("Minimum threshold cannot be greater than maximum threshold.")
+    if not SOURCE_BASE_URL or not SOURCE_PATH_TEMPLATE:
+        raise RuntimeError("Source URL configuration is incomplete.")
+    if not SUMMARY_SECTION_HEADER or not PRIMARY_MATCH_LABEL or not SUMMARY_LABELS:
+        raise RuntimeError("Summary label configuration is incomplete.")
+    if not SECTION_BREAK_PREFIXES:
+        raise RuntimeError("Section break configuration is incomplete.")
+
+
 def run_once(args: argparse.Namespace) -> int:
+    validate_args(args)
+
     scan_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    print(f"Flight scan started at {scan_time}")
-    print("Source: Google Travel route pages, fetched live at runtime.")
+    print(f"Monitor run started at {scan_time}")
+    print("Source pages are fetched live at runtime.")
     print(
-        "Note: Google states these prices can lag behind provider updates by less than 24 hours."
-    )
-    print(
-        f"Showing only live round-trip fares from {format_money(args.min_price)} to {format_money(args.max_price)}."
+        f"Showing matches between {format_value(args.min_threshold)} and {format_value(args.max_threshold)}."
     )
 
-    snapshots, failures = scan_routes(args.origins, args.destinations, args.headful)
-    matches = collect_matching_round_trip_fares(
+    snapshots, failures = scan_routes(args.inputs_a, args.inputs_b, args.headful)
+    matches = collect_matches(
         snapshots,
-        args.airlines,
-        args.min_price,
-        args.max_price,
+        args.filters,
+        args.min_threshold,
+        args.max_threshold,
     )
 
     if args.json_output:
@@ -481,9 +440,9 @@ def run_once(args: argparse.Namespace) -> int:
         print_failures(failures)
         return 1
 
-    if args.show_route_overview:
-        print_route_overview(snapshots)
-    print_matching_round_trip_fares(matches, args.top)
+    if args.show_summary:
+        print_summary(snapshots)
+    print_matches(matches, args.top)
     print_failures(failures)
     return 0
 

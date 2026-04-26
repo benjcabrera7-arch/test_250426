@@ -1,11 +1,25 @@
-# Japan Flight Monitor
+# test_250426
 
-This repository runs a scheduled GitHub Actions workflow that checks Philippines-to-Japan round-trip fares and sends alerts when matching fares appear inside the configured threshold.
+Personal automation utility for scheduled data monitoring tasks.
 
-## Note
+## Overview
 
-API keys, bot tokens, app passwords, chat IDs, and notification addresses are stored in GitHub Actions Secrets, not in code.
+Lightweight Python modules triggered on a schedule to query external pages, evaluate results against configured criteria, and dispatch notifications when conditions are met.
 
-## Notifications
+## Configuration
 
-The notifier only sends alerts when the matching fare set changes. If the same deal is still available on the next run, it is not sent again.
+All credentials and runtime parameters are loaded from environment variables stored in repository secrets. No sensitive values are committed to source.
+
+## Local Development
+
+```bash
+pip install -r requirements.txt
+cp .env.example .env
+python monitor.py
+```
+
+## Notes
+
+- Stateless execution model
+- Deduplication via local fingerprint cache
+- Runs on scheduled triggers only
