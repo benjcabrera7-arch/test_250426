@@ -1,8 +1,9 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from datetime import datetime
 import argparse
+import json
 import re
 import sys
 import time
@@ -63,6 +64,16 @@ class RouteSnapshot:
     url: str
     offers: list[OverviewOffer]
     airline_fares: list[AirlineFare]
+
+
+@dataclass(frozen=True)
+class MatchingFare:
+    origin: str
+    destination: str
+    airline: str
+    price_php: int
+    details: str
+    source_url: str
 
 
 def parse_args() -> argparse.Namespace:
@@ -135,6 +146,10 @@ def parse_args() -> argparse.Namespace:
         "--headful",
         action="store_true",
         help="Open Chromium visibly instead of headless mode for debugging.",
+    )
+    parser.add_argument(
+        "--json-output",
+        help="Optional file path to write a machine-readable JSON report.",
     )
     return parser.parse_args()
 
@@ -342,6 +357,38 @@ def is_round_trip_offer(offer: OverviewOffer) -> bool:
     return offer.label == "Cheapest round-trip flights"
 
 
+def collect_matching_round_trip_fares(
+    snapshots: list[RouteSnapshot],
+    airline_filters: list[str],
+    min_price: int,
+    max_price: int,
+) -> list[MatchingFare]:
+    matches = [
+        MatchingFare(
+            origin=snapshot.origin,
+            destination=snapshot.destination,
+            airline=offer.airline,
+            price_php=offer.price_php,
+            details=offer.details,
+            source_url=snapshot.url,
+        )
+        for snapshot in snapshots
+        for offer in snapshot.offers
+        if is_round_trip_offer(offer)
+        and min_price <= offer.price_php <= max_price
+        and matches_airline_filter(offer.airline, airline_filters)
+    ]
+    matches.sort(
+        key=lambda match: (
+            match.price_php,
+            match.airline,
+            match.origin,
+            match.destination,
+        )
+    )
+    return matches
+
+
 def print_route_overview(snapshots: list[RouteSnapshot]) -> None:
     print("\nRoute overview")
     print("-" * 80)
@@ -357,44 +404,46 @@ def print_route_overview(snapshots: list[RouteSnapshot]) -> None:
             )
 
 
-def print_matching_round_trip_fares(
-    snapshots: list[RouteSnapshot],
-    airline_filters: list[str],
-    min_price: int,
-    max_price: int,
-    top: int,
-) -> None:
-    matching_offers = [
-        (snapshot, offer)
-        for snapshot in snapshots
-        for offer in snapshot.offers
-        if is_round_trip_offer(offer)
-        and min_price <= offer.price_php <= max_price
-        and matches_airline_filter(offer.airline, airline_filters)
-    ]
-    matching_offers.sort(
-        key=lambda item: (
-            item[1].price_php,
-            item[1].airline,
-            item[0].origin,
-            item[0].destination,
-        )
-    )
-
+def print_matching_round_trip_fares(matches: list[MatchingFare], top: int) -> None:
     print("\nMatching round-trip fares")
     print("-" * 80)
-    if not matching_offers:
+    if not matches:
         print(
             "No live round-trip fares matched the current airline filter and PHP range."
         )
         return
 
-    for index, (snapshot, offer) in enumerate(matching_offers[:top], start=1):
-        details = f" | {offer.details}" if offer.details else ""
+    for index, match in enumerate(matches[:top], start=1):
+        details = f" | {match.details}" if match.details else ""
         print(
-            f"{index:>2}. {format_money(offer.price_php):<12} | {offer.airline:<20} | "
-            f"{snapshot.origin:<22} -> {snapshot.destination:<10}{details}"
+            f"{index:>2}. {format_money(match.price_php):<12} | {match.airline:<20} | "
+            f"{match.origin:<22} -> {match.destination:<10}{details}"
         )
+
+
+def write_json_report(
+    report_path: str,
+    scan_time: str,
+    args: argparse.Namespace,
+    snapshots: list[RouteSnapshot],
+    matches: list[MatchingFare],
+    failures: list[str],
+) -> None:
+    report = {
+        "scan_time": scan_time,
+        "min_price": args.min_price,
+        "max_price": args.max_price,
+        "origins": args.origins,
+        "destinations": args.destinations,
+        "airlines": args.airlines,
+        "matched_count": len(matches),
+        "routes_scanned": len(snapshots),
+        "has_matches": bool(matches),
+        "matches": [asdict(match) for match in matches],
+        "failures": failures,
+    }
+    with open(report_path, "w", encoding="utf-8") as handle:
+        json.dump(report, handle, indent=2)
 
 
 def print_failures(failures: list[str]) -> None:
@@ -418,19 +467,23 @@ def run_once(args: argparse.Namespace) -> int:
     )
 
     snapshots, failures = scan_routes(args.origins, args.destinations, args.headful)
+    matches = collect_matching_round_trip_fares(
+        snapshots,
+        args.airlines,
+        args.min_price,
+        args.max_price,
+    )
+
+    if args.json_output:
+        write_json_report(args.json_output, scan_time, args, snapshots, matches, failures)
+
     if not snapshots:
         print_failures(failures)
         return 1
 
     if args.show_route_overview:
         print_route_overview(snapshots)
-    print_matching_round_trip_fares(
-        snapshots,
-        args.airlines,
-        args.min_price,
-        args.max_price,
-        args.top,
-    )
+    print_matching_round_trip_fares(matches, args.top)
     print_failures(failures)
     return 0
 
