@@ -14,7 +14,6 @@ All credentials and runtime parameters are loaded from environment variables sto
 
 ```bash
 pip install -r requirements.txt
-cp .env.example .env
 python monitor.py
 ```
 
