@@ -1,0 +1,67 @@
+name: Japan Flight Monitor
+
+on:
+  workflow_dispatch:
+  schedule:
+    # GitHub Actions cron is best-effort and 5 minutes is the fastest supported cadence.
+    - cron: '*/5 * * * *'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: japan-flight-monitor
+  cancel-in-progress: true
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Cache Playwright browsers
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: ${{ runner.os }}-playwright-chromium-v1
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install playwright
+
+      - name: Install Chromium
+        run: python -m playwright install chromium
+
+      - name: Run flight monitor
+        env:
+          PYTHONIOENCODING: utf-8
+        run: |
+          python japan_flight_monitor.py --top 20 | tee flight-monitor-output.txt
+
+      - name: Publish workflow summary
+        shell: bash
+        run: |
+          {
+            echo "## Japan flight monitor"
+            echo
+            echo '```text'
+            cat flight-monitor-output.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload scan output
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: japan-flight-monitor-${{ github.run_number }}
+          path: flight-monitor-output.txt
